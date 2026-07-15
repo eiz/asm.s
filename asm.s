@@ -5,14 +5,15 @@
 //
 // usage: asm <input.s> <output>
 //
-// this file was created solely by Claude (Opus 4.6, Sonnet 4.6, and Fable 5)
-// and is in the public domain (or CC0 1.0, if you prefer).
+// this file was created solely by AI agents: Claude (Opus 4.6, Sonnet 4.6,
+// and Fable 5) and Codex (GPT-5.6 Sol). It is in the public domain (or CC0
+// 1.0, if you prefer).
 //
 // to bootstrap: as -o asm.o asm.s asm_stage0.s && ld -o asm0 asm.o && ./asm0 asm.s asm
 // or, seeded by any earlier asm binary (no system toolchain):
 //   cat asm.s asm_stage0.s > s0.s && ./asm_seed s0.s asm0 && ./asm0 asm.s asm
 //
-// current binary size: 4892 bytes
+// current binary size: 4850 bytes
 //
 // ── supported instructions ────────────────────────────────────────────────
 //
@@ -302,16 +303,15 @@ _start:
     // Discriminate by the ELF magic at _appended_data: present in a stage 0
     // build (system as, or a seed assembler fed asm.s + asm_stage0.s
     // concatenated), absent in a plain self-hosted build, whose .rodata
-    // follows .text there. x30 can't discriminate: a seed-minted stage 0
-    // is stub-entered too, but must emit its appended (new) stub, not the
-    // inherited one at its own image head.
+    // follows .text there. A self-hosted entry inherits x6 = its stub base
+    // from the decompressor; a seed-minted stage 0 is stub-entered too, but
+    // the magic selects its appended (new) stub instead of inherited x6.
     adr     x9, _appended_data
     ldrb    w10, [x9]            // appended block begins with the header template
     add     x9, x9, #CODE_START  // stage 0: stub follows header template
     cmp     w10, #0x7F           // ELF magic first byte (rodata starts 0x03)
-    b.eq    1f
-    sub     x9, x30, #STUB_SIZE         // self-hosted: stub at CODE_START
-1:  str     x9, [x28, #ST_STUB_BASE]
+    csel    x9, x9, x6, eq       // appended stub if stage 0, inherited otherwise
+    str     x9, [x28, #ST_STUB_BASE]
 
     // store input/output filenames
     ldp     x1, x0, [sp, #16]       // x1=argv[1] (input), x0=argv[2] (output)
@@ -331,11 +331,6 @@ _start:
     svc     #0
     tbnz    x0, #63, err_open
     stp     x0, x0, [x28, #ST_INPUT_LEN]  // content length + main length
-
-    // pre-terminate lines: zero every newline once (both passes reuse this;
-    // `.include` files get the same treatment as run_pass appends them).
-    // x1 = input_buf still valid (syscalls preserve x1-x30), x0 = length
-    bl      zero_newlines
 
     // reloc write cursor: set once — pass 1 emits no entries, so no per-pass
     // reset is needed; x19 keeps the base for the output stage (callee-saved)
@@ -454,11 +449,11 @@ ct_done:
     sub     x20, x2, x20               // x20 = compressed size
 
     // ── assemble the whole output image in input_buf ──────────────────────
-    // [0,1056) = header+stub+dict template (contiguous in both layouts);
-    // compress_text already placed the stream at offset 1056
+    // [0,1048) = header+stub+dict template (contiguous in both layouts);
+    // compress_text already placed the stream at offset 1048
     // x21 = rodata_size (captured before pass 2)
-    ldr     x0, [x28, #ST_STUB_BASE]
-    sub     x9, x0, #CODE_START
+    // x11 still points at full_dict from the compressor scan above
+    sub     x9, x11, #(STUB_SIZE + CODE_START)
     add     x2, x28, #INPUT_BUF_OFF
     mov     x10, #(CODE_START + STUB_SIZE + DICT_SIZE)
     bl      memcpy8
@@ -473,8 +468,8 @@ ct_done:
     add     x9, x19, #0                // base (set before pass 1)
     ldr     x10, [x28, #ST_RELOC_PTR]
     sub     x10, x10, x9               // table bytes = cursor - base
-    bl      memcpy8
     lsr     x22, x10, #3               // x22 = reloc count (callee-saved)
+    bl      memcpy8
 
     // p_filesz = image end - image start (memcpy8 advances x2 exactly)
     add     x1, x28, #INPUT_BUF_OFF
@@ -510,29 +505,26 @@ ct_done:
     mov     x0, #0
     b       exit_common
 
-// memcpy8 — copy x10 bytes (rounded up to a multiple of 8) from x9 to x2
-// leaf; advances x2 by exactly x10, clobbers only x12/x13 otherwise
-// (always copies at least 8 bytes; harmless overshoot past x2+x10 is
-// overwritten by the next append or lies beyond the written image)
+// memcpy8 — copy x10 bytes (a multiple of 8) from x9 to x2
+// leaf; advances x2 by exactly x10 and consumes x9/x10
 memcpy8:
-    mov     x13, #0
-1:  ldr     x12, [x9, x13]
-    str     x12, [x2, x13]
-    add     x13, x13, #8
-    cmp     x13, x10
-    b.lo    1b
-    add     x2, x2, x10
+    cbz     x10, 2f
+1:  ldr     x12, [x9], #8
+    str     x12, [x2], #8
+    subs    x10, x10, #8
+    b.ne    1b
+2:
     ret
 
-// zero_newlines — zero every '\n' in [x1, x1 + x0); leaf, clobbers x0/x9
-zero_newlines:
-1:  subs    x0, x0, #1
-    b.mi    2f
-    ldrb    w9, [x1, x0]
-    cmp     w9, #'\n'
+// terminate_line — advance x19 past the next NUL or newline, replacing a
+// newline with NUL so x0's saved line start is ready for process_line.
+// Leaf; preserves x0 and clobbers only w11.
+terminate_line:
+1:  ldrb    w11, [x19], #1
+    cbz     w11, 2f
+    cmp     w11, #'\n'
     b.ne    1b
-    strb    wzr, [x1, x0]
-    b       1b
+    strb    wzr, [x19, #-1]
 2:  ret
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -685,11 +677,9 @@ parse_register:
     mov     x0, #31
     ret
 
-1:  cmp     w9, #'x'
-    cset    x1, eq                   // x1=1 if 'x' (64-bit), else 0
-    b.eq    parse_reg_xw
-    cmp     w9, #'w'
-    b.ne    parse_reg_fail
+1:  sub     x1, x9, #'w'            // 'w' → 0, 'x' → 1 (sf)
+    cmp     x1, #1
+    b.hi    parse_reg_fail
 parse_reg_xw:
     ldrb    w10, [x0, #1]
     cmp     w10, #'z'
@@ -793,11 +783,10 @@ sym_define:
     // store name pointer + length unconditionally: for an existing entry this
     // just re-points at an identical name (lookup compared the bytes)
     stp     x15, x16, [x0]           // NAME_PTR(0) + NAME_LEN(8), upper word is padding
-    str     x2, [x0, #SYM_VALUE]
     // OR in flags (don't clobber existing bits)
     ldr     x9, [x0, #SYM_FLAGS]
     orr     x9, x3, x9
-    str     x9, [x0, #SYM_FLAGS]
+    stp     x9, x2, [x0, #SYM_FLAGS] // adjacent flags + value
 
     ldr     x30, [sp, #48]
     ret
@@ -916,15 +905,12 @@ run_pass_loop:
     b.eq    rp_include
 
 rp_normal:
-    // lines are already null-terminated (_start zeroed every newline;
-    // the BSS zero after the last byte terminates a final unterminated line)
+    // Save the line start, then terminate it in place before parsing. The BSS
+    // zero after the input terminates a final unterminated line.
     str     x21, [x28, #ST_LINE_NUM]
     add     x0, x19, #0
+    bl      terminate_line
     bl      process_line
-
-    // advance past the line terminator
-1:  ldrb    w11, [x19], #1          // (same words as rp_include's line skip)
-    cbnz    w11, 1b
     add     x21, x21, #1
 
     b       run_pass_loop
@@ -940,8 +926,13 @@ rp_include:
     add     x9, x9, #1
     b       1b
 2:  add     x19, x9, #0                 // advance x19 past the whole line
-3:  ldrb    w11, [x19], #1              // *before* NUL-terminating the path, else
-    cbnz    w11, 3b                     // the injected NUL truncates the line skip
+    cbnz    w11, 3f                     // pass 2: the quote is already the
+    add     x19, x19, #1                // pass-1 NUL — step past it so the skip
+                                        // reaches the real terminator (else the
+                                        // residue counts as an extra line and
+                                        // skews pass-2 error line numbers)
+3:  bl      terminate_line               // before NUL-terminating the path, else
+                                        // the injected NUL truncates the line skip
     strb    wzr, [x9]
     // push the parent context (32-byte entries, 16 nesting levels); the depth
     // check runs before the push and catches include cycles
@@ -975,9 +966,6 @@ rp_include:
     add     x0, x15, #0                 // close fd — a deep/cyclic include
     mov     x8, #SYS_close              // chain must not hit EMFILE
     svc     #0
-    sub     x0, x20, x19                // pre-terminate the new content's lines
-    add     x1, x19, #0
-    bl      zero_newlines
     str     x10, [x28, #ST_INPUT_NAME]  // error context: new file, line 1
     mov     x21, #1
     b       run_pass_loop
@@ -1164,8 +1152,7 @@ dir_data_common:
     str     x0, [x9, x10]               // store 8 bytes (extra bytes harmless)
     add     x10, x10, x22
     str     x10, [x28, x11]             // pos += width
-    ldr     x19, [x28, #ST_EOL_CUR]
-    bl      ws_x19                      // x0 → next non-ws, w9 = char
+    bl      ws_x1                       // parse_expr left x1 at the next token
     cmp     w9, #','
     b.ne    expect_eol_done
     add     x19, x0, #1                 // past the comma → next value
@@ -1461,9 +1448,9 @@ parse_int_char:
     // escape: x0 is past backslash already (x30 dead — frame pops at pea_ret)
     ldrb    w9, [x0], #1            // load escape char, advance past it
     bl      decode_escape
-1:  add     x12, x9, #0
-    add     x0, x0, #1              // skip closing quote
-    b       parse_int_ret
+1:  add     x1, x0, #1              // pointer past closing quote
+    add     x0, x9, #0              // decoded character value
+    b       pea_ret
 
 pe_atom_err:
     adr     x0, msg_syntax
@@ -1706,19 +1693,17 @@ encode_logical_imm:
     tbz     x9, #1, eli_pass1
     // for 32-bit, replicate low 32 bits
     cbz     x1, eli_start
-    and     x0, x0, #0xFFFFFFFF
-    orr     x0, x0, x0, lsl #32
+    bfi     x0, x0, #32, #32
 
 eli_start:
     // x0 = val (left intact until the final encode)
 
-    // reject all-zeros and all-ones
-    cbz     x0, ei_logical_bad
-    mvn     x9, x0
-    cbz     x9, ei_logical_bad
-
-    // rotation = ctz(val & (val + 1))
+    // Reject all-zeros/all-ones while forming val+1 for the rotation below:
+    // unsigned (val + 1) <= 1 exactly for those two invalid values.
     add     x9, x0, #1
+    cmp     x9, #1
+    b.ls    ei_logical_bad
+    // rotation = ctz(val & (val + 1))
     and     x9, x9, x0
     rbit    x10, x9
     clz     x1, x10                  // rotation (x1 arg is dead by now)
@@ -2140,27 +2125,26 @@ ei_d:
     bl      ws_x21
     bl      parse_hash_imm           // x0 = CRm (barrier domain/type)
     movz    w9, #0x309F
-    movk    w9, #0xD503, lsl #16     // dsb base 0xD503309F
     ldrb    w10, [x19, #1]          // 's' (dsb) or 'm' (dmb)
     cmp     w10, #'m'
     b.ne    1f
     orr     w9, w9, #0x20           // dmb
 1:  orr     w0, w9, w0, lsl #8      // | CRm<<8
-    b       emit_inst_done
+    b       ei_sysfixed_tail
 ei_i:
     cmp     x20, #2                  // "ic" → SYS-class; "isb" → fixed
     b.eq    ei_sysop
     movz    w0, #0x3FDF
-    movk    w0, #0xD503, lsl #16     // isb 0xD5033FDF
-    b       emit_inst_done
+    b       ei_sysfixed_tail
 ei_w:                               // wfi 0xD503207F / wfe 0xD503205F
     movz    w0, #0x205F
-    movk    w0, #0xD503, lsl #16     // wfe base
     ldrb    w9, [x19, #2]
     cmp     w9, #'i'
-    b.ne    1f
+    b.ne    ei_sysfixed_tail
     orr     w0, w0, #0x20           // wfi
-1:  b       emit_inst_done
+ei_sysfixed_tail:
+    movk    w0, #0xD503, lsl #16
+    b       emit_inst_done
 // parse_field_reg — parse "<field_expr>, Rt": field→x25 (32-bit), returns x0=Rt.
 // Shared by msr (sysreg form) and the dc/ic/tlbi/at SYS class. Uses [sp,#48].
 parse_field_reg:
@@ -2185,7 +2169,6 @@ ei_sysop:
 ei_daif:
     ldrb    w9, [x0, #4]            // 's' (daifset) or 'c' (daifclr)
     movz    w25, #0x40DF
-    movk    w25, #0xD503, lsl #16    // daifset base 0xD50340DF
     cmp     w9, #'c'
     b.ne    2f
     orr     w25, w25, #0x20         // daifclr: op2 6→7
@@ -2193,7 +2176,7 @@ ei_daif:
     bl      skip1_ws                // skip ',' + ws → '#'
     bl      parse_hash_imm          // x0 = imm
     orr     w0, w25, w0, lsl #8    // | imm<<8
-    b       emit_inst_done
+    b       ei_sysfixed_tail
 
 ei_bcond:
     add     x0, x0, #1              // skip '.'
@@ -2543,8 +2526,7 @@ ei_ldr_eq:
     orr     w0, w0, w10, lsl #10     // imm12
     orr     w0, w0, w23              // Rd = Rt
     orr     w0, w0, w23, lsl #5      // Rn = Rt
-    bl      emit_word_raw
-    b       ei_ldr_eq_done
+    b       emit_inst_done
 
 ei_ldst_pair:
     // x22=L (already set by ei_ld/ei_st)
@@ -2690,17 +2672,17 @@ ei_mov_add:
 
 ei_mov_imm:
     bl      parse_hash_imm
-    // x0 = immediate (no bl in loop, safe to use directly)
+    // x0 = immediate (no bl in the probe, safe to use directly)
     mov     x26, #0                  // phase: 0=MOVZ, 1=MOVN
 ei_mov_try_phase:
-    mov     x25, #0                  // hw shift counter (reset each phase)
-ei_mov_hw_loop:
+    // A MOV-wide immediate has at most one nonzero 16-bit halfword. Align
+    // the least-significant set bit down to its halfword and test that one.
+    rbit    x25, x0
+    clz     x25, x25                 // ctz(x0), or 64 for zero
+    and     x25, x25, #0x30          // halfword shift: 0/16/32/48
     ror     x9, x0, x25
     lsr     x11, x9, #16
     cbz     x11, ei_mov_found
-    add     x25, x25, #16
-    cmp     x25, #64
-    b.lt    ei_mov_hw_loop
     // try MOVN phase — complement in the register's width (32 vs 64) so e.g.
     // `mov w1, #0xffffffff` -> movn w1, #0 (a 64-bit ~ would set the top half)
     cbnz    x26, ei_logical_bad
@@ -2787,8 +2769,7 @@ ei_zr_rn_tail:
 // nop — 0xD503201F
 ei_nop:
     movz    w0, #0x201F
-    movk    w0, #0xD503, lsl #16
-    b       emit_inst_done
+    b       ei_sysfixed_tail
 
 // ── shared emit tails ─────────────────────────────────────────────────────
 // emit_3reg_sf_tail: w9=32-bit base, x23=sf -> set bit31 if sf, then emit_3reg_tail
