@@ -62,7 +62,7 @@ _decomp_stub_start:
     add     x3, x2, #(FULL_DICT_SIZE + T24_DICT_SIZE + 4 - 2*(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + 1)) // t16 codes
     add     x11, x2, #(FULL_DICT_SIZE + T24_DICT_SIZE + T16_DICT_SIZE + 4 - (FULL_DICT_ENTRIES + T24_DICT_ENTRIES + T16_DICT_ENTRIES + 1)) // t8 codes
     add     x0, x2, #(DICT_SIZE + 4)    // stream
-    mov     x1, x7                      // output dest
+    add     x1, x7, #0                  // output dest
 
     // ── decompress ────────────────────────────────────────────────────────
 3:  ldrb    w4, [x0], #1
@@ -95,7 +95,7 @@ _decomp_stub_start:
 
     // ── copy rodata ───────────────────────────────────────────────────────
 _decomp_copy_rodata:
-    mov     x14, x1                     // rodata base (start of copied rodata)
+    add     x14, x1, #0                 // rodata base (start of copied rodata)
     cbz     x8, _decomp_apply_reloc
 7:  ldrb    w3, [x0], #1
     strb    w3, [x1], #1
@@ -143,6 +143,7 @@ _decomp_stub_end:
     .word 0xd4000001
     .word 0x6b09015f
     .word 0x38401c09
+    .word 0xd2ac0016
     .word 0xf87a6b8a
     .word 0x7100255f
     .word 0x71008d3f
@@ -150,11 +151,8 @@ _decomp_stub_end:
     .word 0x7101753f
     .word 0x1a890149
     .word 0x54000061
-    .word 0x8b1d076b
     .word 0xa90157f4
-    .word 0xa9025ff6
     .word 0xa9bc4ffe
-    .word 0xd2ac0016
     .word 0x2a160000
     .word 0x39400a6a
     .word 0x5100c12a
@@ -163,15 +161,15 @@ _decomp_stub_end:
     .word 0x91000400
     .word 0x91000802
     .word 0xf1000e9f
-    .word 0xf9001bfe
-    .word 0xf9401bfe
     .word 0x321b012a
-    .word 0x381ffd4e
+    .word 0x33030540
     .word 0x39400a69
+    .word 0x52a26000
     .word 0x52aa501a
     .word 0x7100b93f
-    .word 0x7101cd3f
-    .word 0x8b0a216b
+    .word 0x7101c95f
+    .word 0x72a36019
+    .word 0x8b0a20eb
     .word 0x8b17156b
     .word 0x91000013
     .word 0x9101c339
@@ -180,143 +178,145 @@ _decomp_stub_end:
     .word 0xa9010803
     .word 0xa9bf53fe
     .word 0xd37ced7a
+    .word 0xeb00013f
     .word 0xf83a6b8a
     .word 0xf9001ffe
-    .word 0x54ffffa1
-    .word 0x91000002
-    .word 0x91000260
-    .word 0x0fa8efaf
-    .word 0x12004800
     .word 0x14000002
+    .word 0x54ffffa1
+    .word 0x91000260
+    .word 0x00cdb010
+    .word 0x12004800
     .word 0x14000005
-    .word 0x17fffcf0
+    .word 0x17fffff7
     .word 0x28812654
+    .word 0x2905542b
     .word 0x2a090000
-    .word 0x2a0a2800
-    .word 0x2a160129
     .word 0x2a166000
-    .word 0x2a177f40
-    .word 0x2a181529
     .word 0x2a190000
-    .word 0x38401409
-    .word 0x39400009
-    .word 0x39400049
-    .word 0x39400269
-    .word 0x3940066a
-    .word 0x3940080a
-    .word 0x5101d14a
-    .word 0x54000060
-    .word 0x540004c1
-    .word 0x540013e0
-    .word 0x6b0b003f
+    .word 0x381ffd4e
+    .word 0x38401449
+    .word 0x38401c49
+    .word 0x5200054a
+    .word 0x540000a1
     .word 0x7101713f
     .word 0x71017d3f
     .word 0x7101913f
     .word 0x7101b13f
+    .word 0x7101b93f
+    .word 0x7101c93f
+    .word 0x7101cd3f
     .word 0x7101d13f
     .word 0x7101e95f
-    .word 0x76afafc0
     .word 0x79400009
+    .word 0x91000002
     .word 0x91028381
+    .word 0x9342fc00
+    .word 0x9b007e73
+    .word 0xb00e067c
+    .word 0xb3607c00
+    .word 0xb9b0b0b2
+    .word 0xc1573b15
+    .word 0xd2800808
+    .word 0xd2a40016
 
 // top-24-bit dictionary (72 entries, 3 bytes each, packed)
-    .word 0x0097ffff
-    .word 0xfffe1400
-    .word 0x17ffff97
-    .word 0x0097fffd
-    .word 0xfffc9400
-    .word 0x97fffb97
-    .word 0x00140001
-    .word 0x80009100
-    .word 0x540000d2
-    .word 0x0117fffe
-    .word 0x00025400
-    .word 0x91000114
-    .word 0xfd910002
-    .word 0x018517ff
-    .word 0xb4000051
-    .word 0x03910004
-    .word 0x4cfcd280
-    .word 0x540003d3
-    .word 0x69370001
-    .word 0x0411386b
-    .word 0x8b090053
-    .word 0x01910283
-    .word 0xffff9400
-    .word 0xb94001b5
-    .word 0x02d10005
-    .word 0x1f01d2a0
-    .word 0xeb0001d6
-    .word 0x16f94003
-    .word 0x00022a00
-    .word 0x54ffff54
-    .word 0x037101c9
-    .word 0x00069100
-    .word 0xd2800191
-    .word 0x01d28007
-    .word 0x00143718
-    .word 0x39400438
-    .word 0x0039400e
-    .word 0x80015280
-    .word 0x53010552
-    .word 0xb9531705
-    .word 0x0a017101
+    .word 0xfe97ffff
+    .word 0xffff97ff
+    .word 0x14000017
+    .word 0xfc97fffd
+    .word 0x000097ff
+    .word 0x14000194
+    .word 0x00d28000
+    .word 0x00009100
+    .word 0x17fffe54
+    .word 0xfd97fffb
+    .word 0x000117ff
+    .word 0xd61f0154
+    .word 0x02910001
+    .word 0x01851400
+    .word 0x91000251
+    .word 0x02910004
+    .word 0x8003d2a0
+    .word 0xd34cfcd2
+    .word 0x00910003
+    .word 0x1801b400
+    .word 0x386b6937
+    .word 0x02530411
+    .word 0x09005400
+    .word 0x9102838b
+    .word 0x01b5ffff
+    .word 0x0005b940
+    .word 0xf94003d1
+    .word 0xff2a0016
+    .word 0x800154ff
+    .word 0xd28007d2
+    .word 0x04380014
+    .word 0x400e3940
+    .word 0x52800039
+    .word 0x05528001
+    .word 0x17055301
+    .word 0x54000353
+    .word 0x01540004
+    .word 0x36028a0a
     .word 0x8b09028a
     .word 0x008b0903
-    .word 0x1a478b15
-    .word 0x8b1d038b
-    .word 0x009101c1
-    .word 0x01c0b500
-    .word 0xd34209d1
-    .word 0x54dac011
-    .word 0x19162905
-    .word 0x54000d2a
-    .word 0x7e9342fc
-    .word 0x0e069b00
-    .word 0xb3607caf
+    .word 0x16028b15
+    .word 0x8b1a478b
+    .word 0xc18b1d03
+    .word 0x00009101
+    .word 0xd34209b5
+    .word 0xefdac011
+    .word 0x19160fa9
+    .word 0x3700012a
+    .word 0x08394000
+    .word 0x00063940
+    .word 0xd2a80091
+    .word 0x2cd63f01
+    .word 0x001bf240
+    .word 0xf9400ff9
 
 // top-16-bit dictionary (66 entries, packed as words)
     .word 0x71015400
     .word 0xf9407100
-    .word 0xf9001100
-    .word 0x54ff1200
-    .word 0xb400f100
-    .word 0x39403400
-    .word 0x91001000
-    .word 0x2a00b7f8
+    .word 0x54ff1100
+    .word 0xf900b400
+    .word 0xf1003940
+    .word 0xd2801200
+    .word 0x34001000
+    .word 0xb7f89100
     .word 0x510034ff
-    .word 0x3710d280
-    .word 0x35ff2a17
-    .word 0x92405000
+    .word 0x2a172a00
+    .word 0x35ff2a18
+    .word 0x50003710
     .word 0xdac0b900
-    .word 0x2a182a0a
-    .word 0x3840cb00
-    .word 0x52805200
-    .word 0x530352ba
-    .word 0x72a37000
-    .word 0x8b1672ba
-    .word 0xb4ff9b0d
-    .word 0x2a19cb09
-    .word 0x37083600
-    .word 0x52845281
-    .word 0x52a15285
-    .word 0x52a552a2
-    .word 0x8b0052a6
+    .word 0xcb009240
+    .word 0x2a162a0a
+    .word 0x52ba5280
+    .word 0x70005303
+    .word 0x9b0d72ba
+    .word 0xcb09b4ff
+    .word 0x2a19d100
+    .word 0x36003316
+    .word 0x38403708
+    .word 0x52815200
+    .word 0x52855284
+    .word 0x8b0052a1
     .word 0x9ac09a9f
-    .word 0xd100a941
-    .word 0x0b0a00cd
+    .word 0xd101a941
     .word 0x1ace10ff
     .word 0x2a092a01
-    .word 0x2a162a0b
-    .word 0x36082a1a
+    .word 0x2a1a2a0b
+    .word 0x36183608
+    .word 0x37003620
+    .word 0x4b09381f
 
 // top-8-bit dictionary (36 entries, packed as words)
     .word 0xa9643a83
     .word 0x53eb1ad3
     .word 0x3870cb52
     .word 0x9ab52a8b
-    .word 0x32b8aa37
-    .word 0x3336f88a
-    .word 0x0ba84b4a
-    .word 0xb2929172
-    .word 0x7810d2d1
+    .word 0xb87237aa
+    .word 0x330b32f8
+    .word 0x36a88a4a
+    .word 0x10b29291
+    .word 0xd1786b4b
