@@ -51,19 +51,20 @@ _decomp_stub_preload:
 //   dc cvau, ic ivau, dsb ish, isb
 
 _decomp_stub_start:
-    // compute decompression destination + preload rodata_size/reloc_count
+    // compute decompression destination; preload supplied rodata_size
     // (the data words live in ELF-header holes, behind the stub base)
-    ldr     w12, [x6, #(STUB_DATA_RELOC_COUNT - CODE_START)]
     add     x7, x6, x7                  // x7 = stub_base + offset
 
     // set up dict/stream pointers (right after stub in file)
     add     x2, x6, #(STUB_SIZE - 4)    // full_dict - 4 (codes 1..FULL)
-    add     x10, x2, #(FULL_DICT_SIZE + 4 - 3*(FULL_DICT_ENTRIES + 1))  // t24/r24 codes
-    add     x3, x2, #(FULL_DICT_SIZE + T24_DICT_SIZE + R24_DICT_SIZE + 4 - 2*(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + 1)) // t16 codes
-    add     x11, x2, #(FULL_DICT_SIZE + T24_DICT_SIZE + R24_DICT_SIZE + T16_DICT_SIZE + 4 - (FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + T16_DICT_ENTRIES + 1)) // t8 codes
+    add     x10, x2, #(FULL_DICT_SIZE + 4 - 3*(FULL_DICT_ENTRIES + 1))  // 3-byte prefix codes
+    add     x3, x2, #(FULL_DICT_SIZE + T24_DICT_SIZE + R24_DICT_SIZE + R5_DICT_SIZE + 4 - 2*(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + R5_DICT_ENTRIES + 1)) // t16 codes
+    add     x11, x2, #(FULL_DICT_SIZE + T24_DICT_SIZE + R24_DICT_SIZE + R5_DICT_SIZE + T16_DICT_SIZE + 4 - (FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + R5_DICT_ENTRIES + T16_DICT_ENTRIES + 1)) // t8 codes
     add     x0, x2, #(DICT_SIZE + 4)    // stream
     add     x1, x7, #0                  // output dest
-    mov     w14, #24                    // ROR24 below restores R24 words
+    // Supported loaders page-align the image. The tier layout makes
+    // x3's low five bits also supply RORV's inverse-rotation count 22
+    // while x3 remains the stable t16 dictionary pointer.
 
     // ── decompress ────────────────────────────────────────────────────────
 3:  ldrb    w4, [x0], #1
@@ -71,19 +72,20 @@ _decomp_stub_start:
     ldr     w5, [x2, x4, lsl #2]       // speculative full dict (harmless otherwise)
     cmp     w4, #FULL_DICT_ENTRIES
     b.ls    6f                          // full dict hit
-    cmp     w4, #(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES)
+    cmp     w4, #(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + R5_DICT_ENTRIES)
     b.hi    5f
-    // t24/r24: 3-byte packed entry (top 24 bits) + 1 literal byte.
-    // Codes with bit 7 set hold ROR8 words, making original byte 1 literal;
-    // rotate the reconstructed word left by 8 before storing it.
+    // Three-byte packed prefix + one literal byte. High-bit codes use ROR10
+    // through code 154, then ROR5; biased pointers double as inverse counts.
     add     x5, x4, x4, lsl #1         // code * 3
     ldr     w5, [x10, x5]
     ldrb    w9, [x0], #1
     orr     w5, w9, w5, lsl #8
     tbz     w4, #7, 6f
-    ror     w5, w5, w14
+    cmp     w4, #(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES)
+    csel    x13, x3, x10, ls
+    ror     w5, w5, w13
     b       6f
-5:  cmp     w4, #(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + T16_DICT_ENTRIES)
+5:  cmp     w4, #(FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + R5_DICT_ENTRIES + T16_DICT_ENTRIES)
     b.hi    7f
     ldrh    w5, [x3, x4, lsl #1]       // t16: upper 16 bits
     ldrh    w9, [x0], #2
@@ -100,7 +102,8 @@ _decomp_stub_start:
 
     // ── copy rodata ───────────────────────────────────────────────────────
 _decomp_copy_rodata:
-    add     x14, x1, #0                 // rodata base (start of copied rodata)
+    // Slot offsets are biased by one; zero beyond p_filesz terminates the table.
+    sub     x14, x1, #1                 // biased rodata base
     cbz     x8, _decomp_apply_reloc
 7:  ldrb    w3, [x0], #1
     strb    w3, [x1], #1
@@ -109,16 +112,15 @@ _decomp_copy_rodata:
 
     // ── apply .dword relocations in rodata ────────────────────────────────
 _decomp_apply_reloc:
-    cbz     x12, _decomp_flush
-8:  ldp     w4, w5, [x0], #8           // slot_off_rodata (u32), target_off (u32)
+8:  ldp     w4, w5, [x0], #8           // biased slot_off (u32), target_off (u32)
+    cbz     w4, _decomp_flush           // zero-backed end marker past p_filesz
     // plain register add/offset: the ldp w-form zero-extends into x4/x5,
-    // and .dword targets are rodata-only so target_off >= 0. The extended-
-    // register form (w4, uxtw) is outside asm's dialect — this stub must
+    // and text/rodata target offsets are nonnegative. The extended-register
+    // form (w4, uxtw) is outside asm's dialect — this stub must
     // be assemblable by asm itself for the seeded (no system as) bootstrap.
     add     x10, x7, x5                // runtime pointer target
     str     x10, [x14, x4]             // store into rodata slot
-    subs    x12, x12, #1
-    b.ne    8b
+    b       8b
 
     // ── icache flush (x7=start, x1=end) ───────────────────────────────────
     // The start is aligned down to a line boundary: with a misaligned start
@@ -142,28 +144,44 @@ _decomp_stub_end:
 // ── compression dictionaries (auto-generated by gen_dict.py) ─────────
 // Do not edit below this line
 
-// full instruction dictionary (45 entries)
+// full instruction dictionary (70 entries)
+    .word 0x00000000
+    .word 0x000ccd47
+    .word 0x110184c7
     .word 0x13020a96
     .word 0x14000002
     .word 0x14000004
+    .word 0x17fffff5
     .word 0x1a890149
-    .word 0x2a0016c0
+    .word 0x28812654
+    .word 0x2905542b
     .word 0x2a004339
     .word 0x321b012a
+    .word 0x34ffc229
+    .word 0x35fffd6a
+    .word 0x371000ba
     .word 0x381ff27f
     .word 0x381ffd4e
     .word 0x3840166b
     .word 0x38401c09
     .word 0x39400a6a
+    .word 0x397f8ccd
+    .word 0x5100c12a
+    .word 0x5101854a
+    .word 0x5101dd21
+    .word 0x52800808
     .word 0x52a26000
     .word 0x52aa501a
     .word 0x54000061
+    .word 0x540000a1
+    .word 0x54000361
     .word 0x54ffffa1
     .word 0x6b09015f
     .word 0x7100255f
     .word 0x71008d3f
     .word 0x7100b13f
     .word 0x7101753f
+    .word 0x7101853f
     .word 0x7940026a
     .word 0x8b0a20eb
     .word 0x91000002
@@ -171,147 +189,143 @@ _decomp_stub_end:
     .word 0x91000260
     .word 0x91000400
     .word 0x91000802
+    .word 0x91000a73
+    .word 0x9101c381
     .word 0x92800c60
+    .word 0x9342fc00
     .word 0xa90005a0
     .word 0xa90109a3
     .word 0xa90157f4
     .word 0xa9bc4ffe
     .word 0xa9bf53fe
-    .word 0xb7ffed80
+    .word 0xb2400ed6
+    .word 0xb3607c00
+    .word 0xcd170698
     .word 0xd100056b
     .word 0xd37ced7a
     .word 0xd4000001
-    .word 0xd5120699
     .word 0xd61f0200
+    .word 0xd63f0120
     .word 0xd65f03c0
+    .word 0xe0cdcdcf
+    .word 0xe8266c12
+    .word 0xf268cc1f
     .word 0xf83a6b8a
     .word 0xf87a6b8a
+    .word 0xf9001bfe
     .word 0xf9001ffe
     .word 0xf9002389
 
-// packed prefix dictionaries: t24=82*3, r24=28*3, t16=63*2 bytes
-    .word 0x00000cd5
-    .word 0x00051100
-    .word 0x14000011
-    .word 0xfd140001
-    .word 0xfffe17ff
-    .word 0x17ffff17
-    .word 0x261fce2d
-    .word 0x05542881
-    .word 0x2a160029
-    .word 0x06330305
-    .word 0xfffd3303
-    .word 0x35ffff35
-    .word 0x01370000
-    .word 0x10003700
-    .word 0x37180137
-    .word 0x1437181b
-    .word 0x6b693800
-    .word 0x39400038
-    .word 0x0e394004
-    .word 0x000e3940
-    .word 0x5100c151
-    .word 0x00510185
-    .word 0x80015280
-    .word 0x53010552
-    .word 0x00531705
-    .word 0x00015400
-    .word 0x54000254
-    .word 0xff540003
-    .word 0x0a0154ff
-    .word 0x8a36028a
-    .word 0x008b0100
-    .word 0x14018b09
-    .word 0x8b15008b
-    .word 0x158b1602
-    .word 0x1a478b17
-    .word 0x8b1d038b
-    .word 0x008fd5d5
-    .word 0x00019100
-    .word 0x91000291
-    .word 0x04910003
-    .word 0x01c19100
-    .word 0x9101c391
-    .word 0x009342fc
+// packed prefix dictionaries: t24=57*3, r24=27*3, r5=32*3, t16=32*2, t8=36 bytes
+    .word 0x05110000
+    .word 0x00001100
+    .word 0x14000114
+    .word 0xff17fffe
+    .word 0x191617ff
+    .word 0x35ffff2a
+    .word 0x01370001
+    .word 0x00143710
+    .word 0x38001538
+    .word 0x0e386b69
+    .word 0x00c15100
+    .word 0x52800051
+    .word 0x05528001
+    .word 0x17055301
+    .word 0x54000053
+    .word 0x0054ffff
+    .word 0x0a017940
+    .word 0x8b01008a
+    .word 0x018b0900
+    .word 0x16028b14
+    .word 0x8b17158b
+    .word 0x038b1a47
+    .word 0x00008b1d
+    .word 0x91000191
+    .word 0x03910002
+    .word 0x00049100
+    .word 0x9101c191
+    .word 0x009101c3
     .word 0xfffb9400
     .word 0x97fffc97
     .word 0xfe97fffd
     .word 0xffff97ff
-    .word 0x9b137c97
-    .word 0x00b3607c
-    .word 0x0000b400
-    .word 0xb84045b5
-    .word 0xc0b94001
+    .word 0xb4000097
+    .word 0x00b4ffd6
+    .word 0x4001b500
+    .word 0xcb0100b9
+    .word 0xc0d10004
     .word 0x8003d101
     .word 0xd28007d2
     .word 0x09d2a002
     .word 0x4cfcd342
-    .word 0xd61f01d3
-    .word 0xd5dac011
-    .word 0x755cded5
-    .word 0xf268cce6
-    .word 0x03f9001b
-    .word 0x2a0af940
-    .word 0x002a1800
-    .word 0x1b002a1a
-    .word 0x52a70053
-    .word 0x0952ba09
-    .word 0x40097940
-    .word 0x52a20a39
-    .word 0x17331b0a
-    .word 0xa3195285
-    .word 0x2a001972
-    .word 0x20540020
-    .word 0x013f7100
-    .word 0x33163f71
-    .word 0x49384040
-    .word 0x015f7100
-    .word 0x39405f71
-    .word 0x739ac069
-    .word 0x407f7100
-    .word 0xf90089f9
-    .word 0x9f71008a
-    .word 0x40ca3600
-    .word 0x1000fef9
-    .word 0x12001100
-    .word 0x2a091ace
-    .word 0x2a172a16
-    .word 0x2a192a18
-    .word 0x34ff3400
-    .word 0x36183608
-    .word 0x37083700
-    .word 0x39403710
-    .word 0x51015000
+    .word 0xf94003d3
+    .word 0x82f9400f
+    .word 0x0a85000a
+    .word 0x000a8600
+    .word 0xa90014c6
+    .word 0x94a80254
+    .word 0x05ccc602
+    .word 0xa10654a0
+    .word 0x5ca80654
+    .word 0x0694a806
+    .word 0x40124e10
+    .word 0x9c4037dc
+    .word 0x4ad4404a
+    .word 0xc04fdc40
+    .word 0xdc405294
+    .word 0x5aca8557
+    .word 0x405aca86
+    .word 0xdc405fdc
+    .word 0x9ce6b067
+    .word 0x40d6ac9f
+    .word 0xea40e2be
+    .word 0xf814a1e7
+    .word 0x00008002
+    .word 0x98180150
+    .word 0x0198b101
+    .word 0x0002a000
+    .word 0x58a00488
+    .word 0x06b0f806
+    .word 0x010aa000
+    .word 0xa7fe0aa0
+    .word 0x0aa7ff0a
+    .word 0x000da000
+    .word 0xa00042a0
+    .word 0x49ca0049
+    .word 0xff4a95d5
+    .word 0xb0414aa7
+    .word 0x51b80051
+    .word 0xc051b880
+    .word 0xca0051b8
+    .word 0x54585051
+    .word 0xc8565848
+    .word 0x88005658
+    .word 0x56d60056
+    .word 0x00a1b800
+    .word 0x8800f7ca
+    .word 0xff58a0fb
+    .word 0x11001000
+    .word 0x2a001200
+    .word 0x2a162a09
+    .word 0x30002a17
+    .word 0x36003400
+    .word 0x37203708
+    .word 0x50003940
     .word 0x52805200
-    .word 0x52845281
-    .word 0x52a15287
-    .word 0x52a652a5
     .word 0x53045303
-    .word 0x54ff5400
-    .word 0x71017000
-    .word 0x8a0072ba
-    .word 0x8b0b8b0a
+    .word 0x72ba5400
     .word 0x91008b13
-    .word 0x9a9f9240
-    .word 0xa8819b0d
-    .word 0xa941a905
-    .word 0xaa13a9ff
-    .word 0xb4ffb400
-    .word 0xb900b7f8
-    .word 0xcb01cb00
-    .word 0xcb0acb09
-    .word 0xcb14cb0d
-    .word 0xdac0d100
-    .word 0xf100eb14
+    .word 0xa9419240
+    .word 0xb7f8b400
+    .word 0xcb00b900
+    .word 0xf100dac0
     .word 0xf940f900
-
-// top-8-bit dictionary (36 entries, packed as words)
     .word 0xa9643a83
     .word 0x53eb1ad3
     .word 0x3870cb52
     .word 0x9ab52a8b
     .word 0x3332100b
     .word 0x4b4a3736
-    .word 0x9178726b
-    .word 0xb2aaa892
-    .word 0xf8d6d1b8
+    .word 0x8a78726b
+    .word 0xa89b9291
+    .word 0xf8d1b8aa
