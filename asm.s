@@ -13,7 +13,7 @@
 // or, seeded by any earlier asm binary (no system toolchain):
 //   cat asm.s asm_stage0.s > s0.s && ./asm_seed s0.s asm0 && ./asm0 asm.s asm
 //
-// current binary size: 4067 bytes
+// current binary size: 3954 bytes
 //
 // ── supported instructions ────────────────────────────────────────────────
 //
@@ -125,33 +125,25 @@
 .equ CODE_START,      112                   // ehdr + phdr, phdr overlaps last 8 ehdr bytes
 
 // ── compression constants ─────────────────────────────────────────────────
-// stub bytes from CODE_START to the dicts; four more stub instructions
+// stub bytes from CODE_START to the tier table; four more stub instructions
 // live in ELF-header holes (e_ident padding + p_paddr, entry point at 80)
-.equ STUB_SIZE,              232
+.equ STUB_SIZE,              212
 // stub data words live in zero ELF-header holes the kernel ignores
 // (e_shoff and e_flags), patched at output time
 .equ STUB_DATA_DECOMP_DEST, 40              // image offset of decomp_dest word (e_shoff)
 .equ STUB_DATA_RODATA_SIZE, 44              // image offset of rodata_size word
 .equ STUB_DATA_RELOC_COUNT, 48              // image offset of reloc_count word (e_flags)
-// six-tier dictionary: codes 1..70 = full word, 71..127 = top 24 bits;
-// 128..154 = ROR10 top 24 bits; 155..186 = ROR5 top 24 bits (all three
-// prefix tiers carry one literal byte); 187..218 = top 16 bits plus two
-// literals; 219..254 = top 8 bits plus three literals; 255 = raw.
-.equ FULL_DICT_ENTRIES, 70
-.equ T24_DICT_ENTRIES,  57
-.equ R24_DICT_ENTRIES,  27
-.equ R5_DICT_ENTRIES,   32
-.equ T16_DICT_ENTRIES,  32
-.equ T8_DICT_ENTRIES,   36
-.equ RAW_CODE,           255
-.equ FULL_DICT_SIZE,    280                 // 70 * 4
-.equ T24_DICT_SIZE,     171                 // 57 * 3 (packed)
-.equ R24_DICT_SIZE,      81                 // 27 * 3 (packed)
-.equ R5_DICT_SIZE,       96                 // 32 * 3 (packed)
-.equ T16_DICT_SIZE,      64                 // 32 * 2 (packed)
-.equ T8_DICT_SIZE,       36                 // 36 * 1
-// 728 dictionary bytes (already word-aligned).
-.equ DICT_SIZE,         728
+// Table-driven tier compression: code 0 ends the stream; codes 1..N are
+// dictionary tiers described by the descriptor table at STUB_SIZE (one byte
+// pair per tier: its entry count, then (nlit<<5)|ror-count);
+// the single code N+1 is the raw escape (a normal table entry with nlit=4).
+// A word matches a tier entry when ror32(word, rot) >> (8*nlit) equals the
+// entry; the literal bytes carry the low bits of the rotated word.
+// gen_dict.py owns the tier menu and asserts these three constants.
+.equ TIER_TBL_SIZE,      36                 // (17 tiers + raw escape) * 2 bytes
+.equ DICT_SIZE,         583                 // table + packed dicts (exact, unpadded)
+.equ COND_DICT_OFF,     550                 // ('b',0) dict offset within the blob
+.equ RAW_CODE,          211                 // 1 + total dictionary codes
 
 // ── section IDs ───────────────────────────────────────────────────────────
 .equ SEC_TEXT,       0                      // pre-multiplied by 8 for direct state block indexing
@@ -252,19 +244,7 @@ msg_badreg:
     .byte   0x01, 0x8c, 0x1d, 0x89, 0x41, 0x72, 0x92, 0xc8
 msg_overflow:
     .byte   0x81, 0x96
-// Biasing the compressor's tier index by eight makes its ROR10 value 10, which
-// doubles as the ROR10 count. The final eight bytes of msg_overflow provide a
-// zero-size bias prefix for the boundary table.
-ct_bounds_bias:
     .byte   0x42, 0xe2, 0x76, 0x95, 0xc4, 0xb2, 0x9c, 0xe5
-// compressor tier boundaries: first code of tier t+1, indexed at bias+8
-ct_bounds:
-    .byte FULL_DICT_ENTRIES + 1
-    .byte FULL_DICT_ENTRIES + T24_DICT_ENTRIES + 1
-    .byte FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + 1
-    .byte FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + R5_DICT_ENTRIES + 1
-    .byte FULL_DICT_ENTRIES + T24_DICT_ENTRIES + R24_DICT_ENTRIES + R5_DICT_ENTRIES + T16_DICT_ENTRIES + 1
-    .byte RAW_CODE
 msg_create:
     .byte   0x02, 0xb4, 0xe6, 0xe6, 0x16, 0x91, 0x80, 0x49, 0xb6, 0xa3
     .byte   0xf3, 0xd1, 0xb9, 0x0b, 0x5a, 0xa4, 0x03
@@ -325,7 +305,7 @@ _start:
     // from the decompressor; a seed-minted stage 0 is stub-entered too, but
     // the magic selects its appended (new) stub instead of inherited x6.
     // Keep the selected stub base pinned in x6: parse_cond also uses the first
-    // 16 bytes of its T8 dictionary as a packed condition-code lookup table.
+    // 16 bytes of its ('b',0) dictionary as a packed condition-code lookup table.
     adr     x9, _appended_data
     ldrb    w10, [x9], #CODE_START          // appended header; advance to stage-0 stub
     cmp     w10, #0x7F                      // ELF magic first byte
@@ -397,49 +377,36 @@ _start:
     add     x2, x28, #INPUT_BUF_OFF
     mov     w10, #(CODE_START + STUB_SIZE + DICT_SIZE)
     bl      copy_bytes
-    sub     x11, x2, #DICT_SIZE             // copied full dict base
-    adr     x16, ct_bounds_bias             // boundary table minus index bias
-
-    add     x12, x27, #0                    // src = text_buf
-    // One scan over full/t24/ROR10/ROR5/t16/t8. ROR10 and ROR5 each expose
-    // one literal byte. The biased tier index supplies ROR10's count; the
-    // ROR5 boundary code 155 has low bits 27, rotating ROR10 into ROR5.
+    add     x22, x27, #0                    // src = text_buf
+    // Probe candidate codes in ascending (cheapest-first) order through the
+    // stub's own _locate helper, pinned at the stub base: blr x6 resolves a
+    // code to its dict entry, whose rotated prefix is compared against the
+    // word. The first hit wins; reaching RAW_CODE emits the word verbatim.
     cbz     x19, ct_done
 ct_loop:
-    ldr     w3, [x12], #4
-    add     w8, w3, #0                      // original word across rotated tiers
-    mov     w9, #0                          // code
-    mov     w13, #0                         // literal bytes
-    mov     w15, #8                         // biased tier index; R24 becomes 10
-    add     x4, x11, #0                     // dict cursor
-ct_scan:
-    add     w9, w9, #1
-    ldrb    w10, [x16, x15]                 // first code of next tier
-    cmp     w10, w9
-    b.ne    1f
-    add     w15, w15, #1                    // crossed into next tier
-    tbz     x15, #1, 2f                     // ordinary literal-count transition
-    tbnz    x15, #0, 3f                     // tier 3: ROR10 -> ROR5
-    tbnz    x13, #1, 2f                     // tier 6: raw escape, not another rotate
-    ror     w3, w3, w15
-    b       1f
-3:  ror     w3, w3, w10                     // boundary 155 => delta ROR27
-    b       1f
-2:  add     w3, w8, #0                      // restore for ordinary prefix tiers
-    add     w13, w13, #1
-    tbnz    x13, #2, ct_emit                // four literal bytes: raw escape
-1:  ldr     w10, [x4], #4                   // entry (may over-read into next entry)
-    lsl     w14, w13, #3                    // compare top (32 - 8*lit) bits
-    lsr     w7, w3, w14
-    eor     w10, w10, w7
-    sub     x4, x4, x13                     // next entry (entry size = 4 - lit)
-    lsl     w10, w10, w14                   // discard over-read bits
-    cbnz    w10, ct_scan
-
-ct_emit:
-    strb    w9, [x2], #1                    // code byte
-    str     w3, [x2]                        // low literal bytes (overwrite-safe)
-    add     x2, x2, x13
+    ldr     w24, [x22], #4                  // next word
+    mov     w25, #1                         // candidate code
+ct_probe:
+    add     w4, w25, #0                     // _locate input: candidate code
+    blr     x6                              // x4 = entry, w11 = (nlit<<5)|ror,
+                                            // x12 = nlit
+    neg     w16, w11                        // RORV reduces mod 32: nlit bits vanish
+    ror     w8, w24, w16                    // apply the tier rotation
+    lsl     w14, w12, #3                    // s = 8 * nlit
+    lsr     x7, x8, x14                     // prefix under test
+    ldr     w5, [x4]                        // entry (may over-read)
+    eor     w5, w5, w7
+    lsl     w5, w5, w14                     // discard over-read bits
+    cbz     w5, ct_hit
+    add     w25, w25, #1
+    cmp     w25, #RAW_CODE
+    b.ne    ct_probe
+    add     w8, w24, #0                     // raw escape: verbatim literals
+    mov     x12, #4
+ct_hit:
+    strb    w25, [x2], #1                   // code byte
+    str     w8, [x2]                        // low literal bytes (overwrite-safe)
+    add     x2, x2, x12
     subs    x19, x19, #4
     b.ne    ct_loop
 
@@ -525,8 +492,6 @@ pi_check_first:
 //  w9 = character after the backslash; returns w9 = decoded character
 // ──────────────────────────────────────────────────────────────────────────
 decode_escape:
-    subs    w10, w9, #'0'
-    csel    w9, w10, w9, eq
     cmp     w9, #'n'
     mov     w10, #10
     csel    w9, w10, w9, eq
@@ -536,6 +501,8 @@ decode_escape:
     cmp     w9, #'r'
     mov     w10, #13
     csel    w9, w10, w9, eq
+    cmp     w9, #'0'
+    csel    w9, wzr, w9, eq
     ret
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -822,7 +789,7 @@ dir_include:
 
     // Read the child at the input buffer append cursor.
     bl      open_ro
-    add     x15, x0, #0                     // save fd (syscalls preserve x1-x30)
+    add     x25, x0, #0                     // save fd (x25 free here; matches common movs)
     ldr     x9, [x28, #ST_INPUT_LEN]
     add     x1, x1, x9                      // dest = append cursor
     svc     #0
@@ -832,7 +799,7 @@ dir_include:
     add     x9, x0, x9                      // grow the content length, bounded by
     tbnz    x9, #20, err_overflow           // bit 20 crosses the 1 MB input bound
     str     x9, [x28, #ST_INPUT_LEN]
-    add     x0, x15, #0                     // close fd before descending
+    add     x0, x25, #0                     // close fd before descending
     mov     x8, #SYS_close
     svc     #0
     mov     w5, #0
@@ -1162,7 +1129,7 @@ adr_word:
 //  parse_cond — parse a two-letter condition code
 //  x0 = first character; returns x0 past the code and x1 = condition 0..14
 //
-//  The first 16 bytes of the T8 compression dictionary double as a packed
+//  The first 16 bytes of the ('b',0) compression dictionary double as a packed
 //  lookup table. gen_dict.py preserves the supported condition nibbles while
 //  using the spare nibbles as T8 prefixes.
 // ──────────────────────────────────────────────────────────────────────────
@@ -1170,7 +1137,7 @@ parse_cond:
     ldrh    w9, [x0], #2
     add     x2, x0, #0
     eor     w9, w9, w9, lsr #8              // char0 ^ char1 in the low byte
-    add     x11, x6, #(STUB_SIZE + FULL_DICT_SIZE + T24_DICT_SIZE + R24_DICT_SIZE + R5_DICT_SIZE + T16_DICT_SIZE)
+    add     x11, x6, #(STUB_SIZE + COND_DICT_OFF)
     ubfx    w10, w9, #1, #4                 // packed-byte index
     ldrb    w1, [x11, x10]
     ubfiz   w9, w9, #2, #1                  // nibble shift: 0 or 4
@@ -1299,15 +1266,15 @@ pe_check_prec:
     blr     x9
     b       pe_loop
 pe_ops:
-    orr     x19, x0, x19                    // opcode 0: |
+    orr     x19, x19, x0                    // opcode 0: |
     ret
     and     x19, x19, x0                    // opcode 1: &
     ret
-    add     x19, x0, x19                    // opcode 2: +
+    add     x19, x19, x0                    // opcode 2: +
     ret
     sub     x19, x19, x0                    // opcode 3: -
     ret
-    mul     x19, x0, x19                    // opcode 4: *
+    mul     x19, x19, x0                    // opcode 4: *
     ret
     lsl     x19, x19, x0                    // opcode 5: <<
     ret
@@ -1423,13 +1390,13 @@ pe_unary_op:
 // ══════════════════════════════════════════════════════════════════════════
 
 // parse_x22_ws — parse the first register into x22, save sf in x23, then skip
-// the comma and whitespace. Uses [sp, #48] for its saved return address.
+// the comma and whitespace. Shares the x14 LR-save convention with other helpers.
 parse_x22_ws:
-    add     x15, x30, #0
+    add     x14, x30, #0
     bl      parse_x23_ws
     add     x22, x23, #0
     add     x23, x24, #0                    // sf
-    br      x15
+    br      x14
 
 // parse_zn_reg — validate a z/n suffix, set x22=0/1, then parse first reg
 parse_zn_reg:
@@ -1441,15 +1408,15 @@ parse_zn_reg:
     b.ne    ei_bad
 
 // parse_x23_ws — parse first register into x23, save sf to x24, skip comma+ws
-// uses [sp, #48] for return address
+// uses x15 for return address (the called leaf helpers preserve it)
 1:
 parse_x23_ws:
-    str     x30, [sp, #48]
+    add     x15, x30, #0
     bl      ws_x21
     bl      parse_register
     add     x23, x0, #0
     add     x24, x1, #0                     // sf (callers can use x24 directly)
-1:  ldr     x30, [sp, #48]
+    add     x30, x15, #0
     b       ws_x2_skip1
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2007,10 +1974,8 @@ ei_isb:
 // tst Rn, #imm / Rm — alias for ANDS XZR, Rn, operand
 ei_tst:
     mov     w22, #3                         // ANDS opc
-    bl      parse_x23_ws                    // x23=Rn, x24=sf
-    add     x25, x23, #0                    // Rn
-    mov     x23, #31                        // Rd = XZR
-    b       ei_logical_operand
+    adr     x14, ei_logical_operand
+    b       ei_rn_xzr_rd
 
 // parse_field_reg — parse "<field_expr>, Rt": field -> x25 and x0 -> Rt.
 // Shared by msr and the dc/ic/tlbi/at SYS class. Uses [sp, #48].
@@ -2123,10 +2088,13 @@ ei_addsub_sf_emit:
 ei_c_cm:
     ldrb    w10, [x19, #2]
     eor     w22, w10, #3                    // 'p' low bits 0→3, 'n' 2→1
+    adr     x14, ei_addsub_operand
+// Shared by tst/cmp/cmn: parse Rn, force Rd=XZR, continue via x14.
+ei_rn_xzr_rd:
     bl      parse_x23_ws                    // x23=Rn, x24=sf
-    add     x25, x23, #0                    // save Rn
+    add     x25, x23, #0                    // Rn
     mov     x23, #31                        // Rd = xzr
-    b       ei_addsub_operand
+    br      x14
 
 ei_logical_bad:
     adr     x0, msg_badimm
