@@ -13,7 +13,7 @@
 // or, seeded by any earlier asm binary (no system toolchain):
 //   cat asm.s asm_stage0.s > s0.s && ./asm_seed s0.s asm0 && ./asm0 asm.s asm
 //
-// current binary size: 3954 bytes
+// current binary size: 3881 bytes
 //
 // ── supported instructions ────────────────────────────────────────────────
 //
@@ -140,10 +140,10 @@
 // A word matches a tier entry when ror32(word, rot) >> (8*nlit) equals the
 // entry; the literal bytes carry the low bits of the rotated word.
 // gen_dict.py owns the tier menu and asserts these three constants.
-.equ TIER_TBL_SIZE,      36                 // (17 tiers + raw escape) * 2 bytes
-.equ DICT_SIZE,         583                 // table + packed dicts (exact, unpadded)
-.equ COND_DICT_OFF,     550                 // ('b',0) dict offset within the blob
-.equ RAW_CODE,          211                 // 1 + total dictionary codes
+.equ TIER_TBL_SIZE,      38                 // (18 tiers + raw escape) * 2 bytes
+.equ DICT_SIZE,         585                 // table + packed dicts (exact, unpadded)
+.equ COND_DICT_OFF,     557                 // ('b',0) dict offset within the blob
+.equ RAW_CODE,          205                 // 1 + total dictionary codes
 
 // ── section IDs ───────────────────────────────────────────────────────────
 .equ SEC_TEXT,       0                      // pre-multiplied by 8 for direct state block indexing
@@ -354,8 +354,8 @@ _start:
     add     x2, x1, x9                      // bss_base = rodata_base + padded rodata span
     str     x2, [x28, #ST_BSS_BASE]
 
-    ldr     x3, [x28, #ST_BSS_POS]
-    add     x20, x2, x3                     // mem_size = bss_base + bss_size
+    ldr     x9, [x28, #ST_BSS_POS]
+    add     x20, x2, x9                     // mem_size = bss_base + bss_size
                                             // (x19-x21 survive run_pass; x22-x26 do NOT)
 
     // Pass 1 emits no relocations, so the scratch cursor is only needed now.
@@ -385,26 +385,26 @@ _start:
     cbz     x19, ct_done
 ct_loop:
     ldr     w24, [x22], #4                  // next word
-    mov     w25, #1                         // candidate code
+    mov     w1, #1                          // candidate code
 ct_probe:
-    add     w4, w25, #0                     // _locate input: candidate code
+    add     w4, w1, #0                      // _locate input: candidate code
     blr     x6                              // x4 = entry, w11 = (nlit<<5)|ror,
                                             // x12 = nlit
     neg     w16, w11                        // RORV reduces mod 32: nlit bits vanish
     ror     w8, w24, w16                    // apply the tier rotation
-    lsl     w14, w12, #3                    // s = 8 * nlit
-    lsr     x7, x8, x14                     // prefix under test
+    lsl     w0, w12, #3                     // s = 8 * nlit
+    lsr     x7, x8, x0                     // prefix under test
     ldr     w5, [x4]                        // entry (may over-read)
     eor     w5, w5, w7
-    lsl     w5, w5, w14                     // discard over-read bits
+    lsl     w5, w5, w0                     // discard over-read bits
     cbz     w5, ct_hit
-    add     w25, w25, #1
-    cmp     w25, #RAW_CODE
+    add     w1, w1, #1
+    cmp     w1, #RAW_CODE
     b.ne    ct_probe
     add     w8, w24, #0                     // raw escape: verbatim literals
     mov     x12, #4
 ct_hit:
-    strb    w25, [x2], #1                   // code byte
+    strb    w1, [x2], #1                    // code byte
     str     w8, [x2]                        // low literal bytes (overwrite-safe)
     add     x2, x2, x12
     subs    x19, x19, #4
@@ -425,7 +425,7 @@ ct_done:
     bl      copy_bytes
     adr     x9, reloc_table
     sub     x10, x18, x9                    // relocation bytes
-    lsr     w22, w10, #3                    // compatibility relocation count
+    lsr     w5, w10, #3                     // compatibility relocation count
     bl      copy_bytes
 
     // p_filesz = image end - image start (copy_bytes advances x2 exactly)
@@ -455,7 +455,7 @@ ct_done:
     stp     x12, x13, [x1, #88]
     // Patch decomp_dest at 40 and raw rodata_size at 44 as one pair.
     stp     w11, w21, [x1, #STUB_DATA_DECOMP_DEST]
-    str     w22, [x1, #STUB_DATA_RELOC_COUNT]
+    str     w5, [x1, #STUB_DATA_RELOC_COUNT]
     add     x2, x12, #0                     // p_filesz = whole image
     mov     w8, #SYS_write
     svc     #0
@@ -501,8 +501,8 @@ decode_escape:
     cmp     w9, #'r'
     mov     w10, #13
     csel    w9, w10, w9, eq
-    cmp     w9, #'0'
-    csel    w9, wzr, w9, eq
+    subs    w10, w9, #'0'                   // '0' decodes to w10 = 0 exactly
+    csel    w9, w10, w9, eq
     ret
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -510,8 +510,8 @@ decode_escape:
 // ──────────────────────────────────────────────────────────────────────────
 copy_bytes:
     cbz     x10, 2f
-1:  ldrb    w12, [x9], #1
-    strb    w12, [x2], #1
+1:  ldrb    w11, [x9], #1
+    strb    w11, [x2], #1
     subs    x10, x10, #1
     b.ne    1b
 2:
@@ -600,9 +600,9 @@ sym_lookup_probe:
 
     // compare name bytes (x12 = direct pointer into input buffer)
 1:  sub     x11, x11, #1                    // matched name length doubles as counter
-    ldrb    w9, [x12, x11]
-    ldrb    w10, [x0, x11]
-    cmp     w10, w9
+    ldrb    w9, [x0, x11]
+    ldrb    w15, [x12, x11]
+    cmp     w15, w9
     b.ne    sym_lookup_probe
     cbnz    w11, 1b
 
@@ -632,17 +632,17 @@ run_pass:
     // callee in the pass tree is audited to preserve x4/x5/x7.
     // Reset numeric label counts/cursors (slot 0 of each digit block).
     adr     x7, numlab_defs                 // pin numeric-label table during the pass
-    mov     w2, #(NUMLAB_DIGITS * NUMLAB_MAX_DEFS * 4)
-1:  sub     x2, x2, #(NUMLAB_MAX_DEFS * 4)
-    str     wzr, [x7, x2]
-    cbnz    w2, 1b
+    mov     w25, #(NUMLAB_DIGITS * NUMLAB_MAX_DEFS * 4)
+1:  sub     x25, x25, #(NUMLAB_MAX_DEFS * 4)
+    str     wzr, [x7, x25]
+    cbnz    w25, 1b
 
     // set up input pointers; include files are re-read every pass, so reset
     // the append cursor to the main file length
     add     x19, x28, #INPUT_BUF_OFF        // input_buf
-    ldr     x9, [x28, #ST_MAIN_LEN]
-    str     x9, [x28, #ST_INPUT_LEN]
-    add     x20, x9, x19                    // x20 = end of current file
+    ldr     x10, [x28, #ST_MAIN_LEN]
+    str     x10, [x28, #ST_INPUT_LEN]
+    add     x20, x19, x10                   // x20 = end of current file
     mov     w4, #0                          // include depth
 
 run_pass_loop:
@@ -687,11 +687,12 @@ pl_check_content:
     // test below, isn't '.', and parse_ident returns length 0 → pl_done
 
     // ── check for numeric label (digit followed by ':') ───────────────────
-    ldrh    w10, [x19]                      // for "N:", w10 = 0x3A30..0x3A39
-    movz    w11, #0x3A30                    // ':' << 8 | '0'
-    sub     w10, w10, w11
+    sub     w10, w9, #'0'
     cmp     w10, #9
     b.hi    pl_not_numlab
+    ldrb    w11, [x19, #1]
+    cmp     w11, #':'
+    b.ne    pl_not_numlab                   // digit w/o ':' fails the ident parse too
 
     // ── numeric label (digit 0-9 stays in x10) — record definition ────────
     // slot 0 of the digit block is the def count in pass 1, the cursor in
@@ -743,7 +744,8 @@ pl_after_label:
 
     // ── directive (starts with '.') ───────────────────────────────────────
 pl_directive:
-    add     x0, x19, #1                     // skip '.'
+    // x0 still equals x19 here (set at pl_check_content, untouched since)
+    add     x0, x0, #1                      // skip '.'
     bl      parse_ident
     // x0 = name start, x1 = name length, x2 = end pointer
     add     x19, x2, #0                     // position after directive name
@@ -783,8 +785,8 @@ dir_include:
 
     // Sixteen retained process_line frames are the supported include depth.
     tbnz    x4, #4, err_overflow
-    ldr     x11, [x28, #ST_INPUT_NAME]
-    stp     x5, x11, [sp, #32]
+    ldr     x10, [x28, #ST_INPUT_NAME]
+    stp     x5, x10, [sp, #32]
     str     x1, [x28, #ST_INPUT_NAME]
 
     // Read the child at the input buffer append cursor.
@@ -846,7 +848,7 @@ ps_store:
 ps_done:
     sub     x0, x12, x20                    // byte count
     strb    wzr, [x12], #1                  // null terminator (harmless for .ascii:
-    add     x0, x0, x21                     // not counted, overwritten by next emit)
+    add     x0, x21, x0                     // not counted, overwritten by next emit)
 advance_sec_pos:
     ldr     x10, [x28, x26]
     add     x10, x0, x10
@@ -891,8 +893,6 @@ dir_dword_ident:
 dir_dword_reloc:
     // relocatable .dword form: label[+const|-const], only valid in .rodata
     tbz     x26, #3, pe_atom_err            // only SEC_RODATA has bit 3 set
-    ldr     x20, [x28, x26]                 // slot offset within .rodata (survives
-                                            // parse_expr's callee-saved frame)
     bl      parse_expr0                     // x0 = target value (sym + addend)
 
     // the slot's file bytes are dead: the stub overwrites every reloc slot with
@@ -903,10 +903,14 @@ dir_dword_reloc:
     // a real label target is >= CODE_START; label-difference exprs are not
     tbnz    x9, #63, pe_atom_err
 
+    // Slot offset within .rodata: the expression parse leaves the section
+    // position untouched, so load it here (x26 survives, as dir_data_common
+    // already relies on).
+    ldr     x10, [x28, x26]
     // Bias slot offsets by one. A zero first word is then an unambiguous
     // end marker supplied by the zero-filled mapping immediately past p_filesz.
-    add     w20, w20, #1
-    stp     w20, w9, [x18], #8
+    add     w10, w10, #1
+    stp     w10, w9, [x18], #8
 
 dir_dword_emit_done:
     mov     w0, #8
@@ -915,8 +919,8 @@ dir_dword_emit_done:
 // strlen_write2 — write null-terminated string in x1 to stderr
 strlen_write2:
     mov     w2, #0
-1:  ldrb    w10, [x1, x2]
-    cbz     w10, write2
+1:  ldrb    w9, [x1, x2]
+    cbz     w9, write2
     add     x2, x2, #1
     b       1b
 
@@ -949,9 +953,9 @@ dir_data_common:
 expect_eol_done:
     bl      ws_x2
     cbz     w9, pl_done
-    ldrh    w9, [x0]                        // comments are exactly "//": a lone '/'
-    movz    w10, #0x2F2F                    // is trailing garbage (GAS rejects it too)
-    cmp     w10, w9
+    ldrh    w10, [x0]                       // comments are exactly "//": a lone '/'
+    sub     w10, w10, w9, lsl #8            // low byte is w9; == '/' iff both are '/'
+    cmp     w10, #'/'                       // (a lone '/' is trailing garbage)
     b.eq    pl_done
     adr     x0, msg_trailing
     // falls through to error_at
@@ -970,11 +974,11 @@ error_at:
     bl      strlen_write2
 
     // build ":[linenum]: " in frame buffer and write it
-    add     x11, sp, #46
+    add     x11, sp, #48
     sub     x10, x11, #2
-    mov     w13, #10
-3:  udiv    x12, x5, x13
-    msub    x14, x12, x13, x5
+    mov     w0, #10
+3:  udiv    x12, x5, x0
+    msub    x14, x12, x0, x5
     add     w14, w14, #'0'
     strb    w14, [x10, #-1]!
     add     x5, x12, #0
@@ -1003,18 +1007,18 @@ die_msg:
     mov     w4, #0                          // bit offset within the current input byte
 1:  ldrh    w5, [x1]                        // two bytes cover every 5-bit extraction
     lsr     w5, w5, w4
-    and     w6, w5, #31
+    and     w11, w5, #31
     add     w4, w4, #5
-    lsr     w7, w4, #3                      // advance input by floor(bit_offset / 8)
+    lsr     w9, w4, #3                      // advance input by floor(bit_offset / 8)
     and     w4, w4, #7
-    add     x1, x1, x7
-    add     w7, w6, #'a'
-    cmp     w6, #26
+    add     x1, x1, x9
+    add     w7, w11, #'a'
+    cmp     w11, #26
     b.lo    2f
     adr     x8, msg_punct - 26
-    ldrb    w7, [x8, x6]
+    ldrb    w7, [x8, x11]
 2:  strb    w7, [x3], #1
-    cmp     w6, #28
+    cmp     w11, #28
     b.ne    1b
     add     x1, x28, #INPUT_BUF_OFF
     sub     x2, x3, x1
@@ -1058,15 +1062,15 @@ parse_label_ref:
     b.hi    plr_named
 
     ldrb    w11, [x0, #1]
-    orr     w12, w11, #4                    // only 'b' and 'f' fold to 'f'
-    cmp     w12, #'f'
+    orr     w9, w11, #4                     // only 'b' and 'f' fold to 'f'
+    cmp     w9, #'f'
     b.ne    plr_named
-    ubfx    x1, x11, #2, #1                 // x1=0 backward, 1 forward
+    ubfx    x9, x11, #2, #1                 // x9=0 backward, 1 forward
 plr_numlab_common:
     add     x2, x0, #2                      // pointer past "Nf"/"Nb"
     add     x11, x7, x10, lsl #8            // digit block (w10 = digit)
     ldr     w0, [x11]                       // cursor (defs consumed so far)
-    add     x0, x0, x1                      // 1-indexed: fwd = cursor+1, back = cursor
+    add     x0, x0, x9                      // 1-indexed: fwd = cursor+1, back = cursor
     ldr     w0, [x11, x0, lsl #2]
     // defs are stored as .text offsets; add the text base (refs are pass-2 only)
     mov     w9, #0                          // section = .text for pea_sec_base
@@ -1086,16 +1090,16 @@ dir_align:
     // x0 = N. Align the ADDRESS, not just the section offset: fold in CODE_START
     // (every section sits at CODE_START + padded-prior-sizes, and output sizing
     // pads those sizes to the largest alignment mask).
-    mov     w9, #1
-    lsl     x9, x9, x0
-    sub     x9, x9, #1                      // current (2^N - 1) mask
+    mov     w8, #1
+    lsl     x8, x8, x0
+    sub     x8, x8, #1                      // current (2^N - 1) mask
     ldr     x10, [x28, #ST_ALIGN_MASK]
-    orr     x10, x10, x9                    // power-of-two masks nest, so OR tracks max N
+    orr     x10, x10, x8                    // power-of-two masks nest, so OR tracks max N
     str     x10, [x28, #ST_ALIGN_MASK]
     ldr     x10, [x28, x26]                 // current position
     add     x10, x10, #CODE_START           // → address residue
     neg     x10, x10
-    and     x0, x9, x10                     // delta = -address & ((1 << N) - 1)
+    and     x0, x8, x10                     // delta = -address & ((1 << N) - 1)
     b       advance_sec_pos
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1134,13 +1138,13 @@ adr_word:
 //  using the spare nibbles as T8 prefixes.
 // ──────────────────────────────────────────────────────────────────────────
 parse_cond:
-    ldrh    w9, [x0], #2
+    ldrh    w10, [x0], #2
     add     x2, x0, #0
-    eor     w9, w9, w9, lsr #8              // char0 ^ char1 in the low byte
-    add     x11, x6, #(STUB_SIZE + COND_DICT_OFF)
-    ubfx    w10, w9, #1, #4                 // packed-byte index
-    ldrb    w1, [x11, x10]
-    ubfiz   w9, w9, #2, #1                  // nibble shift: 0 or 4
+    eor     w10, w10, w10, lsr #8           // char0 ^ char1 in the low byte
+    add     x9, x6, #(STUB_SIZE + COND_DICT_OFF)
+    ubfx    w11, w10, #1, #4                // packed-byte index
+    ldrb    w1, [x9, x11]
+    ubfiz   w9, w10, #2, #1                 // nibble shift: 0 or 4
     lsr     w1, w1, w9
     and     w1, w1, #15
     ret
@@ -1150,26 +1154,26 @@ parse_cond:
 pe_atom_num:
     // hex prefix? first char is a digit (caller guarantees), so any 'x'
     // second char means "0x" in real sources
-    mov     w13, #10                        // radix
+    mov     w8, #10                         // radix
     sub     x2, x0, #1                      // pre-increment scan pointer
     mov     w0, #0                          // accumulator (shared by dec+hex)
     ldrb    w10, [x2, #2]
     cmp     w10, #'x'
     b.ne    2f
     add     x2, x2, #2                      // skip "0x"
-    mov     w13, #16
+    mov     w8, #16
 
 2:  ldrb    w9, [x2, #1]!
     sub     w10, w9, #'0'
     cmp     w10, #9
     b.ls    4f
-    tbz     x13, #4, parse_int_ret          // a-f digits only in radix 16
+    tbz     x8, #4, parse_int_ret           // a-f digits only in radix 16
     orr     w10, w9, #0x20                  // fold uppercase to lowercase
     sub     w10, w10, #'a'
     cmp     w10, #5
     b.hi    parse_int_ret
     add     w10, w10, #10
-4:  madd    x0, x0, x13, x10                // acc = acc*radix + digit
+4:  madd    x0, x0, x8, x10                 // acc = acc*radix + digit
     b       2b
 
 // skip_lsl — consume ", <shift> #N" through the '#', decode lsl/lsr/asr/ror,
@@ -1334,7 +1338,7 @@ pe_atom_ident:
     // pass 1 needs no special case: bases are still 0 (BSS), so add is a no-op
     // (shared tail: '.'-atom and numeric labels enter with x9 = sec*8, x0 = off)
 pea_sec_base:
-    add     x9, x28, x9
+    add     x9, x9, x28
     ldr     x9, [x9, #ST_TEXT_BASE]
     add     x0, x0, x9
     b       pea_ret_x2
@@ -1475,8 +1479,8 @@ parse_reg_num:
     sub     w12, w10, #'0'                  // first digit (loaded by parse_reg_xw)
     cmp     w12, #9
     b.hi    parse_reg_fail
-    ldrb    w10, [x0, #2]
-    sub     w11, w10, #'0'
+    ldrb    w9, [x0, #2]
+    sub     w11, w9, #'0'
     cmp     w11, #9
     add     x2, x0, #2                      // end pointer (single digit); flags unaffected
     b.hi    1f                              // single digit
@@ -1582,8 +1586,8 @@ encode_instruction:
     b.hi    ei_bad
     adr     x12, ei_dispatch
     ldrb    w11, [x12, x11]
-    add     x12, x12, x11, lsl #2
-    br      x12
+    add     x14, x12, x11, lsl #2
+    br      x14
 ei_dispatch:
     .byte   (ei_a - ei_dispatch) >> 2, (ei_b - ei_dispatch) >> 2
     .byte   (ei_c - ei_dispatch) >> 2, (ei_d - ei_dispatch) >> 2
@@ -1647,7 +1651,7 @@ ei_logical_imm:
     eor     w1, w24, #1                     // is_32bit = !sf (w-form: x1 zero-extended)
     bl      encode_logical_imm
     // x0 = (N<<12)|(immr<<6)|imms
-    movz    w10, #0x1200, lsl #16           // logical-immediate base
+    movz    w26, #0x1200, lsl #16           // logical-immediate base
     b       ei_imm_pack
 
     // ── 'c' mnemonics: cmp, cbz, cbnz, clz, cset ──────────────────────────
@@ -1658,7 +1662,7 @@ ei_c:
     bl      parse_label_pc_rel
     bfi     w23, w0, #5, #19
     orr     w9, w23, w22, lsl #24
-    movz    w10, #0x3400, lsl #16
+    movz    w26, #0x3400, lsl #16
     b       ei_addsub_sf_emit
 2:  tbz     w10, #1, ei_c_cm                // odd 'm' has bit 1 clear; 's' has it set
     ldrb    w10, [x19, #3]
@@ -1978,13 +1982,14 @@ ei_tst:
     b       ei_rn_xzr_rd
 
 // parse_field_reg — parse "<field_expr>, Rt": field -> x25 and x0 -> Rt.
-// Shared by msr and the dc/ic/tlbi/at SYS class. Uses [sp, #48].
+// Shared by msr and the dc/ic/tlbi/at SYS class. Uses [sp, #56] (never
+// live across this call: parse_2reg/parse_3reg/parse_mem reload immediately).
 parse_field_reg:
-    str     x30, [sp, #48]
+    str     x30, [sp, #56]
     bl      parse_expr0                     // x0 = field, x2 at ','
     add     w25, w0, #0                     // save field across the reg parse
     bl      ws_x2_skip1                     // skip ',' → x0 at Rt
-    ldr     x30, [sp, #48]
+    ldr     x30, [sp, #56]
     b       parse_register                  // x0 = Rt
 // ei_sysop: dc/ic/tlbi/at — SYS-class. <mnem> <field_expr>, Xt
 //   → 0xD5080000 | field | Rt. field=(op1<<16)|(CRn<<12)|(CRm<<8)|(op2<<5),
@@ -2011,13 +2016,13 @@ ei_daif:
 
 ei_bcond:
     add     x0, x0, #1                      // skip '.'
-    movz    w22, #0x5400, lsl #16           // 0x54000000
+    movz    w26, #0x5400, lsl #16           // 0x54000000
     bl      parse_cond
-    orr     w22, w1, w22                    // base | cond
+    orr     w26, w1, w26                    // base | cond
     bl      parse_label_pc_rel
     // 0x54000000 | (imm19 << 5) | cond
     and     w0, w0, #0x7FFFF
-    orr     w0, w22, w0, lsl #5
+    orr     w0, w26, w0, lsl #5
     br      x16
 
 // ror Rd, Rn, Rm — RORV: 0x1AC02C00 (32-bit) / 0x9AC02C00 (64-bit)
@@ -2063,7 +2068,7 @@ ei_reg_operand:
 ei_addsub_imm:
     // immediate form: #expr or #:lo12:expr (imm12, optionally <<12)
     bl      parse_hash_imm                  // x0=val, x2=is_lo12
-    movz    w10, #0x1100, lsl #16           // unshifted add/sub-immediate base
+    movz    w26, #0x1100, lsl #16           // unshifted add/sub-immediate base
     lsr     x9, x0, #12
     cbz     x9, 1f                          // fits in 12 bits -> shift = 0
     // Else try LSL #12: low 12 bits must be zero and the value must fit in
@@ -2071,7 +2076,7 @@ ei_addsub_imm:
     tst     x0, #0xffffffffff000fff
     b.ne    ei_logical_bad
     lsr     x0, x0, #12                     // imm12 = val >> 12
-    movz    w10, #0x1140, lsl #16           // shifted add/sub-immediate base
+    movz    w26, #0x1140, lsl #16           // shifted add/sub-immediate base
     // sf op 0 10001 shift imm12 Rn Rd
 1:
 ei_imm_pack:
@@ -2079,9 +2084,9 @@ ei_imm_pack:
     orr     w9, w9, w0, lsl #10             // imm12
     bfi     w9, w22, #29, #2                // op|S bits
 
-// shared tail: w10=base opcode, w9=partial instruction, x24=sf
+// shared tail: w26=base opcode, w9=partial instruction, x24=sf
 ei_addsub_sf_emit:
-    orr     w0, w10, w9
+    orr     w0, w26, w9
     b       emit_with_sf24
 
 // cmp/cmn Rn, #imm / cmp/cmn Rn, Rm — reuse addsub with Rd=xzr
@@ -2263,8 +2268,8 @@ ei_ldr_literal:
     bl      parse_label_pc_rel              // x0 = (target - PC) / 4
     ubfiz   w0, w0, #5, #19                 // imm19 << 5
     orr     w0, w0, w23                     // Rt
-    movz    w9, #0x1800, lsl #16            // 32-bit base (0x18000000)
-    orr     w9, w9, w24, lsl #30            // sf=1 → 0x58000000 for 64-bit
+    movz    w26, #0x1800, lsl #16           // 32-bit base (0x18000000)
+    orr     w9, w26, w24, lsl #30           // sf=1 → 0x58000000 for 64-bit
     b       orr_w9_emit
 
 // ldr Rt, =sym — pseudo-op for a symbol's ADDRESS: adrp Rt, sym ; add Rt, Rt,
@@ -2297,14 +2302,14 @@ ei_ldst_pair:
     add     x9, x26, x26, lsl #1            // 3*mode
     and     x9, x9, #3
     asr     w0, w19, w21
-    movz    w11, #0x2900, lsl #16           // 32-bit STP/LDP base (signed offset)
-    orr     w11, w11, w21, lsl #31          // bit 0 of scale is sf
-    eor     w11, w11, w9, lsl #23           // apply addressing mode bits
-    orr     w11, w11, w22, lsl #22
-    bfi     w11, w0, #15, #7                // imm7 at bits[21:15]
-    orr     w11, w11, w24, lsl #10
-    orr     w11, w11, w25, lsl #5
-    orr     w0, w11, w23
+    movz    w26, #0x2900, lsl #16           // 32-bit STP/LDP base (signed offset)
+    orr     w26, w26, w21, lsl #31          // bit 0 of scale is sf
+    eor     w26, w26, w9, lsl #23           // apply addressing mode bits
+    orr     w26, w26, w22, lsl #22
+    bfi     w26, w0, #15, #7                // imm7 at bits[21:15]
+    orr     w26, w26, w24, lsl #10
+    orr     w26, w26, w25, lsl #5
+    orr     w0, w26, w23
     br      x16
 
 // mul Rd, Rn, Rm — MADD Rd, Rn, Rm, XZR
@@ -2394,8 +2399,8 @@ ei_mov_try_phase:
     clz     x10, x10                        // ctz(x0), or 64 for zero
     and     x10, x10, #0x30                 // halfword shift: 0/16/32/48
     ror     x25, x0, x10
-    lsr     x11, x25, #16
-    cbz     x11, ei_mov_found
+    lsr     x9, x25, #16
+    cbz     x9, ei_mov_found
     // try MOVN phase — complement in the register's width (32 vs 64) so e.g.
     // `mov w1, #0xffffffff` -> movn w1, #0 (a 64-bit ~ would set the top half)
     tbz     w26, #30, ei_logical_bad        // MOVN phase already tried
