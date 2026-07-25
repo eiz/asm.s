@@ -13,7 +13,7 @@
 // or, seeded by any earlier asm binary (no system toolchain):
 //   cat asm.s asm_stage0.s > s0.s && ./asm_seed s0.s asm0 && ./asm0 asm.s asm
 //
-// current binary size: 3820 bytes
+// current binary size: 3825 bytes
 //
 // ── supported instructions ────────────────────────────────────────────────
 //
@@ -125,7 +125,7 @@
 // ── compression constants ─────────────────────────────────────────────────
 // stub bytes from CODE_START to the tier table; four more stub instructions
 // live in ELF-header holes (e_ident padding + p_paddr, entry point at 80)
-.equ STUB_SIZE,              212
+.equ STUB_SIZE,              208
 // stub data words live in zero ELF-header holes the kernel ignores
 // (e_shoff and e_flags), patched at output time
 .equ STUB_DATA_DECOMP_DEST, 40              // image offset of decomp_dest word (e_shoff)
@@ -383,6 +383,7 @@ _start:
     mov     w10, #(CODE_START + STUB_SIZE + DICT_SIZE)
     bl      copy_bytes
     sub     x14, x27, #0                    // src = text_buf
+    adr     x15, ct_located                 // _locate returns without touching x30
     // Probe candidate codes in ascending (cheapest-first) order through the
     // stub's own _locate helper, pinned at the stub base: blr x6 resolves a
     // code to its dict entry, whose rotated prefix is compared against the
@@ -395,6 +396,7 @@ ct_probe:
     add     w4, w1, #0                      // _locate input: candidate code
     blr     x6                              // x4 = entry, w11 = (nlit<<5)|ror,
                                             // x9 = nlit, x10 = nlit - 4
+ct_located:
     neg     w0, w11                         // RORV reduces mod 32: nlit bits vanish
     ror     w8, w24, w0                     // apply the tier rotation
     // The raw escape is the final entry-size-0 tier: _locate flags it with
@@ -443,8 +445,12 @@ ct_done:
     add     x11, x12, #0xFFF
     and     x11, x11, #0xFFFFFFFFFFFFF000   // ceil to page
 
-    // p_memsz = ceil_page(p_filesz) + total_mem_size
+    // p_memsz = ceil_page(p_filesz) + total_mem_size + four scratch bytes.
+    // The decompressor's overlapping word reconstruction and final zero store
+    // may touch [decompressed_end, decompressed_end+4), including for a
+    // text-only image whose logical end otherwise lands exactly at p_memsz.
     add     x13, x11, x20
+    add     x13, x13, #4
 
     // ── open output file ──────────────────────────────────────────────────
     mov     x0, #AT_FDCWD
